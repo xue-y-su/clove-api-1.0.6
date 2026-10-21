@@ -1,0 +1,40 @@
+[Unit]
+Description=New API Service
+Documentation=https://github.com/QuantumNous/new-api
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=new-api
+Group=new-api
+WorkingDirectory=/var/lib/new-api
+EnvironmentFile=/etc/new-api/new-api.env
+ExecStart=/opt/new-api/new-api --log-dir /var/log/new-api
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=180
+TimeoutStopSec=120
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+ReadWritePaths=/var/lib/new-api /var/log/new-api
+StateDirectory=new-api
+StateDirectoryMode=0700
+LogsDirectory=new-api
+LogsDirectoryMode=0700
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

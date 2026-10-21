@@ -1,0 +1,176 @@
+# Production deployment for the current Clove API source tree.
+#
+# 1. Copy .env.production.example to .env.production and set every required value.
+# 2. Run: docker compose --env-file .env.production config
+# 3. Run: docker compose --env-file .env.production up -d --build
+#
+# Terminate TLS at a trusted reverse proxy. The application port binds to
+# loopback by default; expose it publicly only when a firewall and TLS proxy
+# are already in place.
+
+services:
+  new-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: clove-api:${CLOVE_API_IMAGE_TAG:-v1.0.6}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 2m
+    pids_limit: 512
+    command: ["--log-dir", "/app/logs"]
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
+    volumes:
+      - new_api_data:/data
+      - new_api_logs:/app/logs
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700
+    environment:
+      SQL_DSN: "postgresql://newapi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/new_api?sslmode=disable"
+      SQL_MAX_IDLE_CONNS: "${SQL_MAX_IDLE_CONNS:-40}"
+      SQL_MAX_OPEN_CONNS: "${SQL_MAX_OPEN_CONNS:-120}"
+      SQL_MAX_LIFETIME: "${SQL_MAX_LIFETIME:-300}"
+      BIND_ADDRESS: "0.0.0.0"
+      REDIS_CONN_STRING: "redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0"
+      REDIS_POOL_SIZE: "${REDIS_POOL_SIZE:-20}"
+      DEPLOYMENT_MODE: "production"
+      SESSION_SECRET: "${SESSION_SECRET:?set SESSION_SECRET}"
+      CRYPTO_SECRET: "${CRYPTO_SECRET:?set CRYPTO_SECRET}"
+      TOKEN_SECRET_PHASE: "${TOKEN_SECRET_PHASE:-dual-write}"
+      TOKEN_HMAC_KEY: "${TOKEN_HMAC_KEY:?set TOKEN_HMAC_KEY}"
+      TOKEN_ENCRYPTION_KEYS: "${TOKEN_ENCRYPTION_KEYS:?set TOKEN_ENCRYPTION_KEYS}"
+      FRONTEND_BASE_URL: "${FRONTEND_BASE_URL:?set FRONTEND_BASE_URL}"
+      SESSION_COOKIE_SECURE: "true"
+      SESSION_COOKIE_TRUSTED_URL: "${SESSION_COOKIE_TRUSTED_URL:?set SESSION_COOKIE_TRUSTED_URL}"
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:?set CORS_ALLOW_ORIGINS}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:?set TRUSTED_PROXIES}"
+      TLS_INSECURE_SKIP_VERIFY: "false"
+      SMTP_INSECURE_SKIP_VERIFY: "false"
+      DEBUG: "false"
+      GIN_MODE: "release"
+      ENABLE_PPROF: "false"
+      DIFY_DEBUG: "false"
+      ERROR_LOG_ENABLED: "true"
+      BATCH_UPDATE_ENABLED: "true"
+      MAX_REQUEST_BODY_MB: "${MAX_REQUEST_BODY_MB:-128}"
+      UPSTREAM_RESPONSE_BODY_LIMIT_MB: "${UPSTREAM_RESPONSE_BODY_LIMIT_MB:-128}"
+      MAX_FILE_DOWNLOAD_MB: "${MAX_FILE_DOWNLOAD_MB:-64}"
+      STREAM_SCANNER_MAX_BUFFER_MB: "${STREAM_SCANNER_MAX_BUFFER_MB:-128}"
+      ANONYMOUS_REQUEST_BODY_LIMIT_KB: "${ANONYMOUS_REQUEST_BODY_LIMIT_KB:-512}"
+      API_REQUEST_BODY_LIMIT_KB: "${API_REQUEST_BODY_LIMIT_KB:-8192}"
+      RELAY_TIMEOUT: "${RELAY_TIMEOUT:-0}"
+      RELAY_IDLE_CONN_TIMEOUT: "${RELAY_IDLE_CONN_TIMEOUT:-90}"
+      RELAY_RESPONSE_HEADER_TIMEOUT: "${RELAY_RESPONSE_HEADER_TIMEOUT:-300}"
+      RELAY_MAX_IDLE_CONNS: "${RELAY_MAX_IDLE_CONNS:-500}"
+      RELAY_MAX_IDLE_CONNS_PER_HOST: "${RELAY_MAX_IDLE_CONNS_PER_HOST:-100}"
+      STREAMING_TIMEOUT: "${STREAMING_TIMEOUT:-300}"
+      SHUTDOWN_TIMEOUT_SECONDS: "${SHUTDOWN_TIMEOUT_SECONDS:-120}"
+      AUDIT_OUTBOX_INTERVAL_SECONDS: "${AUDIT_OUTBOX_INTERVAL_SECONDS:-2}"
+      AUDIT_OUTBOX_BATCH_SIZE: "${AUDIT_OUTBOX_BATCH_SIZE:-100}"
+      AUDIT_OUTBOX_RETENTION_DAYS: "${AUDIT_OUTBOX_RETENTION_DAYS:-30}"
+      IP_SECURITY_PROJECTION_RETRY_SECONDS: "${IP_SECURITY_PROJECTION_RETRY_SECONDS:-60}"
+      IP_SECURITY_PROJECTION_BATCH_SIZE: "${IP_SECURITY_PROJECTION_BATCH_SIZE:-500}"
+      IP_SECURITY_PROJECTION_WORKER_ENABLED: "${IP_SECURITY_PROJECTION_WORKER_ENABLED:-}"
+      LOG_SQL_DSN: "${LOG_SQL_DSN:-}"
+      LOG_SQL_CLICKHOUSE_TTL_DAYS: "${LOG_SQL_CLICKHOUSE_TTL_DAYS:-0}"
+      IP_SECURITY_CLICKHOUSE_OVERLAP_SECONDS: "${IP_SECURITY_CLICKHOUSE_OVERLAP_SECONDS:-300}"
+      IP_SECURITY_LOG_SOURCE_GENERATION: "${IP_SECURITY_LOG_SOURCE_GENERATION:-}"
+      NODE_TYPE: "${NODE_TYPE:-master}"
+      NODE_NAME: "${NODE_NAME:-clove-api-1}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    depends_on:
+      new-api-media-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - edge
+      - backend
+
+  new-api-media-init:
+    image: busybox:1.36.1
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-ec", "mkdir -p /data/announcement-media && chown -R 10001:10001 /data/announcement-media && find /data/announcement-media -type d -exec chmod 0750 {} + && find /data/announcement-media -type f -exec chmod 0640 {} +"]
+    volumes:
+      - new_api_data:/data
+    network_mode: none
+
+  postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: newapi
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+      POSTGRES_DB: new_api
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newapi -d new_api"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?set REDIS_PASSWORD}"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - backend
+
+volumes:
+  new_api_data:
+  new_api_logs:
+  postgres_data:
+  redis_data:
+
+networks:
+  edge:
+  backend:
+    internal: true

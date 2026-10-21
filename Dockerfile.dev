@@ -1,0 +1,41 @@
+# Backend-only build for frontend development
+# Skips frontend build, uses a placeholder for //go:embed web/dist
+
+FROM golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS builder
+
+ENV GO111MODULE=on CGO_ENABLED=0
+ARG TARGETOS
+ARG TARGETARCH
+ENV GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64}
+ENV GOEXPERIMENT=greenteagc
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN mkdir -p web/default/dist web/classic/dist && \
+    echo '<!doctype html><html><head><title>dev</title></head><body>use frontend dev server</body></html>' > web/default/dist/index.html && \
+    echo '<!doctype html><html><head><title>dev</title></head><body>use frontend dev server</body></html>' > web/classic/dist/index.html
+
+RUN go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(tr -d '\r\n' < VERSION)'" -o new-api
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata wget \
+    && groupadd --gid 10001 newapi \
+    && useradd --uid 10001 --gid newapi --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin newapi \
+    && install -d -o newapi -g newapi -m 0700 /data /app/logs \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
+
+COPY --from=builder /build/new-api /
+COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
+EXPOSE 3000
+WORKDIR /data
+USER 10001:10001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1:3000/api/status || exit 1
+ENTRYPOINT ["/new-api"]

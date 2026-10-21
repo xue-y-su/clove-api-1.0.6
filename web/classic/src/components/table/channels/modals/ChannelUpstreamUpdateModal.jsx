@@ -1,0 +1,331 @@
+/*
+Copyright (C) 2025 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  Modal,
+  Checkbox,
+  Empty,
+  Input,
+  Tabs,
+  Typography,
+} from '@douyinfe/semi-ui';
+import {
+  IllustrationNoResult,
+  IllustrationNoResultDark,
+} from '@douyinfe/semi-illustrations';
+import { IconSearch } from '@douyinfe/semi-icons';
+import { useIsMobile } from '../../../../hooks/common/useIsMobile';
+import { createUpstreamDiffSelection } from '../../../../hooks/channels/upstreamUpdateUtils';
+
+const normalizeModels = (models = []) =>
+  Array.from(
+    new Set(
+      (models || []).map((model) => String(model || '').trim()).filter(Boolean),
+    ),
+  );
+
+const filterByKeyword = (models = [], keyword = '') => {
+  const normalizedKeyword = String(keyword || '')
+    .trim()
+    .toLowerCase();
+  if (!normalizedKeyword) {
+    return models;
+  }
+  return models.filter((model) =>
+    String(model).toLowerCase().includes(normalizedKeyword),
+  );
+};
+
+const ChannelUpstreamUpdateModal = ({
+  visible,
+  addModels = [],
+  retainedModels = [],
+  removeModels = [],
+  preferredTab = 'add',
+  confirmLoading = false,
+  onConfirm,
+  onCancel,
+  isExplicitPublication = false,
+}) => {
+  const { t } = useTranslation();
+  const isMobile = useIsMobile();
+
+  const normalizedAddModels = useMemo(
+    () => normalizeModels(addModels),
+    [addModels],
+  );
+  const normalizedRemoveModels = useMemo(
+    () => normalizeModels(removeModels),
+    [removeModels],
+  );
+  const normalizedRetainedModels = useMemo(
+    () => normalizeModels(retainedModels),
+    [retainedModels],
+  );
+
+  const [selectedAddModels, setSelectedAddModels] = useState([]);
+  const [selectedRemoveModels, setSelectedRemoveModels] = useState([]);
+  const [keyword, setKeyword] = useState('');
+  const [activeTab, setActiveTab] = useState('add');
+
+  const addTabEnabled = normalizedAddModels.length > 0;
+  const removeTabEnabled = normalizedRemoveModels.length > 0;
+  const filteredAddModels = useMemo(
+    () => filterByKeyword(normalizedAddModels, keyword),
+    [normalizedAddModels, keyword],
+  );
+  const filteredRemoveModels = useMemo(
+    () => filterByKeyword(normalizedRemoveModels, keyword),
+    [normalizedRemoveModels, keyword],
+  );
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    const selection = createUpstreamDiffSelection(
+      normalizedAddModels,
+      normalizedRemoveModels,
+    );
+    setSelectedAddModels(selection.selectedAdd);
+    setSelectedRemoveModels(selection.selectedRemove);
+    setKeyword('');
+    const normalizedPreferredTab = preferredTab === 'remove' ? 'remove' : 'add';
+    if (normalizedPreferredTab === 'remove' && removeTabEnabled) {
+      setActiveTab('remove');
+      return;
+    }
+    if (normalizedPreferredTab === 'add' && addTabEnabled) {
+      setActiveTab('add');
+      return;
+    }
+    setActiveTab(
+      addTabEnabled ? 'add' : removeTabEnabled ? 'remove' : 'retained',
+    );
+  }, [
+    visible,
+    addTabEnabled,
+    removeTabEnabled,
+    preferredTab,
+    normalizedAddModels,
+    normalizedRemoveModels,
+  ]);
+
+  const currentModels =
+    activeTab === 'add'
+      ? filteredAddModels
+      : activeTab === 'retained'
+        ? filterByKeyword(normalizedRetainedModels, keyword)
+        : filteredRemoveModels;
+  const currentSelectedModels =
+    activeTab === 'add'
+      ? selectedAddModels
+      : activeTab === 'remove'
+        ? selectedRemoveModels
+        : [];
+  const currentSetSelectedModels =
+    activeTab === 'add'
+      ? setSelectedAddModels
+      : activeTab === 'remove'
+        ? setSelectedRemoveModels
+        : null;
+  const selectedAddCount = selectedAddModels.length;
+  const selectedRemoveCount = selectedRemoveModels.length;
+  const checkedCount = currentModels.filter((model) =>
+    currentSelectedModels.includes(model),
+  ).length;
+  const isAllChecked =
+    currentModels.length > 0 && checkedCount === currentModels.length;
+  const isIndeterminate =
+    checkedCount > 0 && checkedCount < currentModels.length;
+
+  const handleToggleAllCurrent = (checked) => {
+    if (!currentSetSelectedModels) return;
+    if (checked) {
+      const merged = normalizeModels([
+        ...currentSelectedModels,
+        ...currentModels,
+      ]);
+      currentSetSelectedModels(merged);
+      return;
+    }
+    const currentSet = new Set(currentModels);
+    currentSetSelectedModels(
+      currentSelectedModels.filter((model) => !currentSet.has(model)),
+    );
+  };
+
+  const tabList = [
+    {
+      itemKey: 'add',
+      tab: `${t('新增模型')} (${selectedAddCount}/${normalizedAddModels.length})`,
+      disabled: !addTabEnabled,
+    },
+    {
+      itemKey: 'retained',
+      tab: `${t('保留模型')} (${normalizedRetainedModels.length})`,
+      disabled: normalizedRetainedModels.length === 0,
+    },
+    {
+      itemKey: 'remove',
+      tab: `${t('缺失模型')} (${selectedRemoveCount}/${normalizedRemoveModels.length})`,
+      disabled: !removeTabEnabled,
+    },
+  ];
+
+  const submitSelectedChanges = () => {
+    onConfirm?.({
+      addModels: selectedAddModels,
+      removeModels: selectedRemoveModels,
+    });
+  };
+
+  const handleSubmit = () => {
+    submitSelectedChanges();
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      title={t('处理上游模型更新')}
+      okText={t('确定')}
+      cancelText={t('取消')}
+      size={isMobile ? 'full-width' : 'medium'}
+      centered
+      closeOnEsc
+      maskClosable
+      confirmLoading={confirmLoading}
+      onCancel={onCancel}
+      onOk={handleSubmit}
+      bodyStyle={{ maxHeight: isMobile ? '72vh' : 560, overflowY: 'auto' }}
+    >
+      <div className='flex flex-col gap-3'>
+        <Typography.Text type='secondary' size='small'>
+          {t(
+            '请确认上游新增、保留和缺失的模型；缺失模型默认保留，勾选后才移除。',
+          )}
+        </Typography.Text>
+        {isExplicitPublication ? (
+          <Typography.Text
+            type='warning'
+            size='small'
+            className='rounded border border-amber-400 p-3'
+          >
+            {t(
+              '批准新增后，模型仍需显式定价并加入至少一个真实启用分组，才会显示在模型广场。',
+            )}
+          </Typography.Text>
+        ) : null}
+
+        <Tabs
+          type='slash'
+          size='small'
+          tabList={tabList}
+          activeKey={activeTab}
+          onChange={(key) => setActiveTab(key)}
+        />
+        <div className='flex items-center gap-3 text-xs text-gray-500'>
+          <span>
+            {t('新增已选 {{selected}} / {{total}}', {
+              selected: selectedAddCount,
+              total: normalizedAddModels.length,
+            })}
+          </span>
+          <span>
+            {t('删除已选 {{selected}} / {{total}}', {
+              selected: selectedRemoveCount,
+              total: normalizedRemoveModels.length,
+            })}
+          </span>
+        </div>
+
+        <Input
+          prefix={<IconSearch size={14} />}
+          placeholder={t('搜索模型')}
+          value={keyword}
+          onChange={(value) => setKeyword(value)}
+          showClear
+        />
+
+        <div style={{ maxHeight: 320, overflowY: 'auto', paddingRight: 8 }}>
+          {currentModels.length === 0 ? (
+            <Empty
+              image={
+                <IllustrationNoResult style={{ width: 150, height: 150 }} />
+              }
+              darkModeImage={
+                <IllustrationNoResultDark style={{ width: 150, height: 150 }} />
+              }
+              description={t('暂无匹配模型')}
+              style={{ padding: 24 }}
+            />
+          ) : activeTab === 'retained' ? (
+            <div className='grid grid-cols-1 md:grid-cols-2 gap-x-4'>
+              {currentModels.map((model) => (
+                <Typography.Text key={`retained:${model}`} className='my-1'>
+                  {model}
+                </Typography.Text>
+              ))}
+            </div>
+          ) : (
+            <Checkbox.Group
+              value={currentSelectedModels}
+              onChange={(values) =>
+                currentSetSelectedModels(normalizeModels(values))
+              }
+            >
+              <div className='grid grid-cols-1 md:grid-cols-2 gap-x-4'>
+                {currentModels.map((model) => (
+                  <Checkbox
+                    key={`${activeTab}:${model}`}
+                    value={model}
+                    className='my-1'
+                  >
+                    {model}
+                  </Checkbox>
+                ))}
+              </div>
+            </Checkbox.Group>
+          )}
+        </div>
+
+        {activeTab !== 'retained' ? (
+          <div className='flex items-center justify-end gap-2'>
+            <Typography.Text type='secondary' size='small'>
+              {t('已选择 {{selected}} / {{total}}', {
+                selected: checkedCount,
+                total: currentModels.length,
+              })}
+            </Typography.Text>
+            <Checkbox
+              checked={isAllChecked}
+              indeterminate={isIndeterminate}
+              aria-label={t('全选当前列表模型')}
+              onChange={(e) => handleToggleAllCurrent(e.target.checked)}
+            />
+          </div>
+        ) : null}
+      </div>
+    </Modal>
+  );
+};
+
+export default ChannelUpstreamUpdateModal;

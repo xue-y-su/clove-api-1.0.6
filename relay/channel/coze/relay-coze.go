@@ -1,0 +1,388 @@
+package coze
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/types"
+	"github.com/samber/lo"
+
+	"github.com/gin-gonic/gin"
+)
+
+func convertCozeChatRequest(c *gin.Context, request dto.GeneralOpenAIRequest) (*CozeChatRequest, error) {
+	var messages []CozeEnterMessage
+	for index, message := range request.Messages {
+		if message.Role == "user" {
+			content, contentType, err := convertCozeMessageContent(message)
+			if err != nil {
+				return nil, fmt.Errorf("convert message %d: %w", index, err)
+			}
+			messages = append(messages, CozeEnterMessage{
+				Role:        "user",
+				Content:     content,
+				ContentType: contentType,
+			})
+		}
+	}
+	userID := helper.GetResponseID(c)
+	if len(request.User) > 0 {
+		switch common.GetJsonType(request.User) {
+		case "string":
+			if err := common.Unmarshal(request.User, &userID); err != nil {
+				return nil, fmt.Errorf("decode user: %w", err)
+			}
+		case "number":
+			userID = string(request.User)
+		default:
+			return nil, errors.New("user must be a string or number")
+		}
+	}
+	cozeRequest := &CozeChatRequest{
+		BotId:              c.GetString("bot_id"),
+		UserId:             userID,
+		AdditionalMessages: messages,
+		Stream:             lo.FromPtrOr(request.Stream, false),
+	}
+	return cozeRequest, nil
+}
+
+func convertCozeMessageContent(message dto.Message) (any, string, error) {
+	if message.IsStringContent() {
+		return message.StringContent(), "text", nil
+	}
+	parts := message.ParseContent()
+	if len(parts) == 0 {
+		return nil, "", errors.New("message content is empty or unsupported")
+	}
+
+	hasMedia := false
+	for _, part := range parts {
+		if part.Type != dto.ContentTypeText {
+			hasMedia = true
+			break
+		}
+	}
+	if !hasMedia {
+		return message.StringContent(), "text", nil
+	}
+
+	cozeParts := make([]CozeContentPart, 0, len(parts))
+	for _, part := range parts {
+		switch part.Type {
+		case dto.ContentTypeText:
+			if part.Text != "" {
+				cozeParts = append(cozeParts, CozeContentPart{Type: "text", Text: part.Text})
+			}
+		case dto.ContentTypeImageURL:
+			image := part.GetImageMedia()
+			if image == nil || !isCozeRemoteFileURL(image.Url) {
+				return nil, "", errors.New("Coze image content requires an HTTP(S) URL")
+			}
+			cozeParts = append(cozeParts, CozeContentPart{Type: "image", FileURL: image.Url})
+		case dto.ContentTypeFile:
+			file := part.GetFile()
+			if file == nil {
+				return nil, "", errors.New("Coze file content is invalid")
+			}
+			if file.FileId != "" {
+				cozeParts = append(cozeParts, CozeContentPart{Type: "file", FileID: file.FileId})
+			} else if isCozeRemoteFileURL(file.FileData) {
+				cozeParts = append(cozeParts, CozeContentPart{Type: "file", FileURL: file.FileData})
+			} else {
+				return nil, "", errors.New("Coze file content requires file_id or an HTTP(S) URL")
+			}
+		case dto.ContentTypeInputAudio:
+			audio := part.GetInputAudio()
+			if audio == nil || !isCozeRemoteFileURL(audio.Data) {
+				return nil, "", errors.New("Coze audio content requires an HTTP(S) URL")
+			}
+			cozeParts = append(cozeParts, CozeContentPart{Type: "audio", FileURL: audio.Data})
+		case dto.ContentTypeVideoUrl:
+			video := part.GetVideoUrl()
+			if video == nil || !isCozeRemoteFileURL(video.Url) {
+				return nil, "", errors.New("Coze video content requires an HTTP(S) URL")
+			}
+			cozeParts = append(cozeParts, CozeContentPart{Type: "video", FileURL: video.Url})
+		default:
+			return nil, "", fmt.Errorf("unsupported Coze content type %q", part.Type)
+		}
+	}
+	if len(cozeParts) == 0 {
+		return nil, "", errors.New("message content is empty")
+	}
+	encoded, err := common.Marshal(cozeParts)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal Coze content: %w", err)
+	}
+	return string(encoded), "object_string", nil
+}
+
+func isCozeRemoteFileURL(value string) bool {
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")
+}
+
+func cozeChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	responseBody, err := io.ReadAll(common.LimitUpstreamResponseBody(resp.Body))
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+	service.CloseResponseBodyGracefully(resp)
+	// convert coze response to openai response
+	var response dto.TextResponse
+	var cozeResponse CozeChatDetailResponse
+	response.Model = info.UpstreamModelName
+	err = json.Unmarshal(responseBody, &cozeResponse)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+	if cozeResponse.Code != 0 {
+		return nil, types.NewError(errors.New(cozeResponse.Msg), types.ErrorCodeBadResponseBody)
+	}
+	// 从上下文获取 usage
+	var usage dto.Usage
+	usage.PromptTokens = c.GetInt("coze_input_count")
+	usage.CompletionTokens = c.GetInt("coze_output_count")
+	usage.TotalTokens = c.GetInt("coze_token_count")
+	response.Usage = usage
+	response.Id = helper.GetResponseID(c)
+
+	var responseContent json.RawMessage
+	for _, data := range cozeResponse.Data {
+		if data.Type == "answer" {
+			responseContent = data.Content
+			response.Created = data.CreatedAt
+		}
+	}
+	// 添加 response.Choices
+	response.Choices = []dto.OpenAITextResponseChoice{
+		{
+			Index:        0,
+			Message:      dto.Message{Role: "assistant", Content: responseContent},
+			FinishReason: "stop",
+		},
+	}
+	jsonResponse, err := json.Marshal(response)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(resp.StatusCode)
+	_, _ = c.Writer.Write(jsonResponse)
+
+	return &usage, nil
+}
+
+func cozeChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
+	scanner := helper.NewStreamScanner(resp.Body)
+	scanner.Split(bufio.ScanLines)
+	helper.SetEventStreamHeaders(c)
+	id := helper.GetResponseID(c)
+	var responseText string
+
+	var currentEvent string
+	var currentData string
+	var usage = &dto.Usage{}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if line == "" {
+			if currentEvent != "" && currentData != "" {
+				if err := handleCozeEvent(c, currentEvent, currentData, &responseText, usage, id, info); err != nil {
+					return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+				}
+				currentEvent = ""
+				currentData = ""
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "event:") {
+			currentEvent = strings.TrimSpace(line[6:])
+			continue
+		}
+
+		if strings.HasPrefix(line, "data:") {
+			currentData = strings.TrimSpace(line[5:])
+			continue
+		}
+	}
+
+	// Last event
+	if currentEvent != "" && currentData != "" {
+		if err := handleCozeEvent(c, currentEvent, currentData, &responseText, usage, id, info); err != nil {
+			return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+	helper.Done(c)
+
+	if usage.TotalTokens == 0 {
+		usage = service.ResponseText2Usage(c, responseText, info.UpstreamModelName, c.GetInt("coze_input_count"))
+	}
+
+	return usage, nil
+}
+
+func handleCozeEvent(c *gin.Context, event string, data string, responseText *string, usage *dto.Usage, id string, info *relaycommon.RelayInfo) error {
+	switch event {
+	case "conversation.chat.completed":
+		var chatData CozeChatResponseData
+		err := json.Unmarshal([]byte(data), &chatData)
+		if err != nil {
+			return fmt.Errorf("decode Coze completion event: %w", err)
+		}
+
+		usage.PromptTokens = chatData.Usage.InputCount
+		usage.CompletionTokens = chatData.Usage.OutputCount
+		usage.TotalTokens = chatData.Usage.TokenCount
+
+		finishReason := "stop"
+		stopResponse := helper.GenerateStopResponse(id, common.GetTimestamp(), info.UpstreamModelName, finishReason)
+		if err = helper.ObjectData(c, stopResponse); err != nil {
+			return fmt.Errorf("write Coze completion event: %w", err)
+		}
+
+	case "conversation.message.delta":
+		var messageData CozeChatV3MessageDetail
+		err := json.Unmarshal([]byte(data), &messageData)
+		if err != nil {
+			return fmt.Errorf("decode Coze message event: %w", err)
+		}
+
+		var content string
+		err = json.Unmarshal(messageData.Content, &content)
+		if err != nil {
+			return fmt.Errorf("decode Coze message content: %w", err)
+		}
+
+		*responseText += content
+
+		openaiResponse := dto.ChatCompletionsStreamResponse{
+			Id:      id,
+			Object:  "chat.completion.chunk",
+			Created: common.GetTimestamp(),
+			Model:   info.UpstreamModelName,
+		}
+
+		choice := dto.ChatCompletionsStreamResponseChoice{
+			Index: 0,
+		}
+		choice.Delta.SetContentString(content)
+		openaiResponse.Choices = append(openaiResponse.Choices, choice)
+
+		if err = helper.ObjectData(c, openaiResponse); err != nil {
+			return fmt.Errorf("write Coze message event: %w", err)
+		}
+
+	case "error":
+		var errorData CozeError
+		err := json.Unmarshal([]byte(data), &errorData)
+		if err != nil {
+			return fmt.Errorf("decode Coze error event: %w", err)
+		}
+		return fmt.Errorf("Coze stream error %d: %s", errorData.Code, errorData.Message)
+	}
+	return nil
+}
+
+func checkIfChatComplete(a *Adaptor, c *gin.Context, info *relaycommon.RelayInfo) (error, bool) {
+	requestURL := fmt.Sprintf("%s/v3/chat/retrieve", info.ChannelBaseUrl)
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, requestURL, nil)
+	if err != nil {
+		return err, false
+	}
+	query := req.URL.Query()
+	query.Set("conversation_id", c.GetString("coze_conversation_id"))
+	query.Set("chat_id", c.GetString("coze_chat_id"))
+	req.URL.RawQuery = query.Encode()
+	err = a.SetupRequestHeader(c, &req.Header, info)
+	if err != nil {
+		return err, false
+	}
+
+	resp, err := doRequest(req, info) // 调用 doRequest
+	if err != nil {
+		return err, false
+	}
+	if resp == nil { // 确保在 doRequest 失败时 resp 不为 nil 导致 panic
+		return fmt.Errorf("resp is nil"), false
+	}
+	defer resp.Body.Close() // 确保响应体被关闭
+
+	// 解析 resp 到 CozeChatResponse
+	var cozeResponse CozeChatResponse
+	responseBody, err := io.ReadAll(common.LimitUpstreamResponseBody(resp.Body))
+	if err != nil {
+		return fmt.Errorf("read response body failed: %w", err), false
+	}
+	err = json.Unmarshal(responseBody, &cozeResponse)
+	if err != nil {
+		return fmt.Errorf("unmarshal response body failed: %w", err), false
+	}
+	if cozeResponse.Data.Status == "completed" {
+		// 在上下文设置 usage
+		c.Set("coze_token_count", cozeResponse.Data.Usage.TokenCount)
+		c.Set("coze_output_count", cozeResponse.Data.Usage.OutputCount)
+		c.Set("coze_input_count", cozeResponse.Data.Usage.InputCount)
+		return nil, true
+	} else if cozeResponse.Data.Status == "failed" || cozeResponse.Data.Status == "canceled" || cozeResponse.Data.Status == "requires_action" {
+		return fmt.Errorf("chat status: %s", cozeResponse.Data.Status), false
+	} else {
+		return nil, false
+	}
+}
+
+func getChatDetail(a *Adaptor, c *gin.Context, info *relaycommon.RelayInfo) (*http.Response, error) {
+	requestURL := fmt.Sprintf("%s/v3/chat/message/list", info.ChannelBaseUrl)
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("new request failed: %w", err)
+	}
+	query := req.URL.Query()
+	query.Set("conversation_id", c.GetString("coze_conversation_id"))
+	query.Set("chat_id", c.GetString("coze_chat_id"))
+	req.URL.RawQuery = query.Encode()
+	err = a.SetupRequestHeader(c, &req.Header, info)
+	if err != nil {
+		return nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+	resp, err := doRequest(req, info)
+	if err != nil {
+		return nil, fmt.Errorf("do request failed: %w", err)
+	}
+	return resp, nil
+}
+
+func doRequest(req *http.Request, info *relaycommon.RelayInfo) (*http.Response, error) {
+	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
+	if err != nil {
+		return nil, fmt.Errorf("get channel http client failed: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil { // 增加对 client.Do(req) 返回错误的检查
+		return nil, fmt.Errorf("client.Do failed: %w", err)
+	}
+	// _ = resp.Body.Close()
+	return resp, nil
+}

@@ -1,0 +1,12 @@
+{
+  "Allow the /v1/alpha/search endpoint to route requests.": "Allow the /v1/alpha/search endpoint to route requests.",
+  "Charge configured tool calls in addition to model usage.": "Charge configured tool calls in addition to model usage.",
+  "Failed to load relay billing settings": "Failed to load relay billing settings",
+  "Please fix relay billing settings before saving": "Please fix relay billing settings before saving",
+  "Quality and size matrix": "Quality and size matrix",
+  "Sync diagnostics to failed usage logs": "Sync diagnostics to failed usage logs",
+  "Visible to all user groups by default": "Visible to all user groups by default",
+  "Rows are model groups and columns are user groups. A checked cell means that user group can see the model group in the catalog.": "Rows are model groups and columns are user groups. A checked cell means that user group can see the model group in the catalog.",
+  "All current and future user groups": "All current and future user groups",
+  "Visible to {{userGroup}} for {{catalogGroup}}": "Visible to {{userGroup}} for {{catalogGroup}}"
+}
